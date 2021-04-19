@@ -159,6 +159,8 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+
+    看了源码，感觉跟 dropout 没啥区别，是我哪里看错了吗。。
     """
     def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()

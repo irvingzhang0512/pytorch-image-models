@@ -132,6 +132,7 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        """普通多层感知机，fc+relu+dropout+fc+dropout"""
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -141,29 +142,48 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
+    """Multi-Head Attention"""
+
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
+
+        # dim 应该是整体输入/输出的通道数量
+        # head_dim 应该是每个 head 的通道数量，最终是多个head结构concat
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
 
+        # 生成 q/k/v 的矩阵都统一生成 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x):
+        # Batch size, N 好像是 encoder 数量？，embedding 向量长度
         B, N, C = x.shape
+
+        # x(B, N, C) @ qkv(dim, dim*3) = (B, N, dim*3)
+        # (B, N, dim*3) -> (B, N, 3, num_heads, head_dim) -> (3, B, num_heads, N, head_dim)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+
+        # q/k/v (B, num_heads, N, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
+        # k.tranpose(-2, -1) = (B, num_heads, head_dim, N)
+        # result (B, num_heads, N, N)
+        # 矩阵乘法似乎只关注后两位的shape
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
+        # attn(B, num_heads, N, N) @ v(B, num_heads, N, head_dim) = (B, num_heads, N, head_dim)
+        # 最终转换为 (B, N, C)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+
+        # (B, N, C)
         return x
 
 
@@ -173,15 +193,21 @@ class Block(nn.Module):
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.norm1 = norm_layer(dim)
+
+        # multi-head self-attention
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        # 看了源码，没感觉有 dropout 有啥区别，可能我理解不深。。
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
+        
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x):
+        # self-attention
         x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
@@ -264,6 +290,8 @@ class VisionTransformer(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+
+        # 最关键的组件
         self.blocks = nn.Sequential(*[
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
@@ -322,14 +350,25 @@ class VisionTransformer(nn.Module):
             self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
+        # patch_embed 应该就是将图片先分块的操作
         x = self.patch_embed(x)
+
+        # cls_token 可能是 vit 的？
         cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        
         if self.dist_token is None:
+            # 拼接上面两个
             x = torch.cat((cls_token, x), dim=1)
         else:
+            # DeiT 专属
             x = torch.cat((cls_token, self.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
+        
+        # 添加位置信息
         x = self.pos_drop(x + self.pos_embed)
+
+        # 应该就是最关键的 self-attention FFN 等
         x = self.blocks(x)
+
         x = self.norm(x)
         if self.dist_token is None:
             return self.pre_logits(x[:, 0])
@@ -339,6 +378,7 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         x = self.forward_features(x)
         if self.head_dist is not None:
+            # DeiT 中的结构，与原始 Vit 无关
             x, x_dist = self.head(x[0]), self.head_dist(x[1])  # x must be a tuple
             if self.training and not torch.jit.is_scripting():
                 # during inference, return the average of both classifier predictions
@@ -346,6 +386,7 @@ class VisionTransformer(nn.Module):
             else:
                 return (x + x_dist) / 2
         else:
+            # 普通的全连接层，输出 num_classes 以便用于后续 softmax
             x = self.head(x)
         return x
 
