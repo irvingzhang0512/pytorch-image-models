@@ -161,6 +161,7 @@ class Attention(nn.Module):
 
     def forward(self, x):
         # Batch size, N 好像是 encoder 数量？，embedding 向量长度
+        # C == dim
         B, N, C = x.shape
 
         # x(B, N, C) @ qkv(dim, dim*3) = (B, N, dim*3)
@@ -220,19 +221,33 @@ class PatchEmbed(nn.Module):
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
+
+        # 图像的尺寸
         self.img_size = img_size
+
+        # 切割后每一块（后简称patch）的尺寸
         self.patch_size = patch_size
+
+        # patch的尺寸与数量
         self.patch_grid = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
         self.num_patches = self.patch_grid[0] * self.patch_grid[1]
 
+        # 切分图像，获取patch。说白了，就是通过滑框获取每个patch的特征
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
+        # 输入图像的尺寸
         B, C, H, W = x.shape
+
+        # 要求输入数据必须固定
         # FIXME look at relaxing size constraints
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        
+        # proj(x) 这一步就是卷积滑框操作，得到的结果应该是 B, embed_dim, patch_height, patch_width
+        # x.flatten(2) 其实就是将上一部结果转换为 B, embed_dim, num_patchs
+        # 后续 Trnasformer 需要的输入是 B, num_batches, embed_dim
         x = self.proj(x).flatten(2).transpose(1, 2)
         x = self.norm(x)
         return x
@@ -353,7 +368,7 @@ class VisionTransformer(nn.Module):
         # patch_embed 应该就是将图片先分块的操作
         x = self.patch_embed(x)
 
-        # cls_token 可能是 vit 的？
+        # cls_token 可能是 vit 引入的
         cls_token = self.cls_token.expand(x.shape[0], -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         
         if self.dist_token is None:
